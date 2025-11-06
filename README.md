@@ -48,3 +48,6 @@ The bot identifies tokens with strong breakout potential and sends alerts direct
    Replace BOT_TOKEN and CHAT_ID with your Telegram bot credentials
 4. Run the bot:
    python pump_detector.py
+   
+## 📄 License
+MIT License 
