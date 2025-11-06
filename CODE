@@ -1,0 +1,146 @@
+import requests
+import pandas as pd
+import os
+import time
+from datetime import datetime
+
+# === CONFIG ===
+API_KEY = os.getenv("CMC_API_KEY")  # 🔒 stored securely in environment
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+URL = 'https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest'
+HEADERS = {'Accepts': 'application/json', 'X-CMC_PRO_API_KEY': API_KEY}
+
+today = datetime.now().strftime('%Y-%m-%d')
+HISTORY_FILE = f'token_history_{today}.csv'
+PRED_FILE = f'pump_predictions_{today}.csv'
+
+COOL_FILE = 'volume_spike_cooldown.csv'
+PENDING_FILE = 'volume_spike_pending.csv'
+SUPPRESS_FILE = 'orphan_suppression.csv'
+BAN_FILE = 'token_bans.csv'
+
+QUALIFIED_SIMPLE_FILE = 'qualified_simple.csv'
+LEADER_CANDIDATES_FILE = 'leader_candidates.csv'
+CONFIRM_SUPPRESS_FILE = 'confirm_suppress.csv'
+
+MAX_HISTORY = 24
+
+# === RULES ===
+COOLDOWN_SECONDS = 6 * 60 * 60
+CONFIRM_WINDOW_HOURS = 3
+CONFIRM_LOOKBACK_HOURS = 48
+ORPHAN_SUPPRESS_HOURS = 24
+DEGRADE_PCT = 5.0
+BAN_HOURS = 24
+
+ANTISTALL_MIN_HOURS = 1
+ANTISTALL_MAX_HOURS = 2
+ANTISTALL_MIN_GAIN = 3.0
+ANTISTALL_MIN_24H = 15.0
+
+NOISE_1H_MIN = 2.0
+NOISE_VOLMCAP_MIN = 90.0
+NOISE_LATEENTRY_24H = 35.0
+NOISE_LATEENTRY_1H = 1.0
+NOISE_BLOWOFF_1H = 50.0
+NOISE_BLOWOFF_24H = 80.0
+
+MIN_PRICE_USD = 1e-4
+
+# ---------- Telegram ----------
+def send_telegram_message(message: str):
+    if not BOT_TOKEN or not CHAT_ID:
+        print("\u26a0\ufe0f Telegram credentials not set.")
+        return
+    url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
+    payload = {'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
+    try:
+        requests.post(url, data=payload, timeout=10)
+    except Exception as e:
+        print(f"❌ Telegram Error: {e}")
+
+# ---------- Utils ----------
+def update_token_history(df):
+    filtered_df = df[(df['Vol/Mcap %'] > 10) & (df['Volume_24h'] > 1e6)]
+    if os.path.exists(HISTORY_FILE):
+        old_df = pd.read_csv(HISTORY_FILE)
+        combined_df = pd.concat([old_df, filtered_df], ignore_index=True)
+    else:
+        combined_df = filtered_df.copy()
+    combined_df = combined_df.sort_values(by='Timestamp')
+    combined_df = combined_df.groupby('Symbol').tail(MAX_HISTORY)
+    combined_df.to_csv(HISTORY_FILE, index=False)
+
+def estimate_simple_phase(row):
+    change_1h = row['1h %']
+    change_24h = row['24h %']
+    if change_24h < 35 and change_1h > 10:
+        return "🟢 Early Pump Phase (80%)", 0.8
+    elif 35 <= change_24h < 55:
+        return "🟡 Mid Pump Phase (55%)", 0.55
+    elif change_24h >= 55:
+        return "🔴 Late Pump Phase (30%)", 0.3
+    else:
+        return "⚪ Unclear Phase (15%)", 0.15
+
+# ---------- Fetch CMC ----------
+def fetch_cmc_page(start, limit):
+    params = {'start': str(start), 'limit': str(limit), 'convert': 'USD'}
+    resp = requests.get(URL, headers=HEADERS, params=params, timeout=25)
+    resp.raise_for_status()
+    return resp.json().get('data', [])
+
+# ---------- Main ----------
+def fetch_and_analyze_tokens():
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        data = fetch_cmc_page(1, 500)
+    except Exception as e:
+        print(f"❌ API Error: {e}")
+        return
+    if not data:
+        print("⚠\ufe0f No tokens returned from API.")
+        return
+
+    records = [{
+        'Timestamp': timestamp,
+        'Name': token['name'],
+        'Symbol': token['symbol'],
+        'Price': token['quote']['USD']['price'],
+        'Volume_24h': token['quote']['USD']['volume_24h'],
+        'MarketCap': token['quote']['USD']['market_cap'],
+        'Vol/Mcap %': (token['quote']['USD']['volume_24h'] / token['quote']['USD']['market_cap'] * 100) if token['quote']['USD']['market_cap'] else 0,
+        '1h %': token['quote']['USD']['percent_change_1h'],
+        '24h %': token['quote']['USD']['percent_change_24h'],
+        '7d %': token['quote']['USD']['percent_change_7d']
+    } for token in data]
+
+    df = pd.DataFrame(records)
+    df = df[df['Price'] >= MIN_PRICE_USD]
+    update_token_history(df)
+
+    for _, row in df.iterrows():
+        if (row['Vol/Mcap %'] > 100.0) and (5.0 <= row['1h %'] <= 15.0) and (row['24h %'] >= 10.0):
+            sym = row['Symbol']
+            phase, prob = estimate_simple_phase(row)
+            message = (
+                f"🚨 *PUMP DETECTED [SIMPLE]* 🏆\n"
+                f"*{row['Name']}* ({row['Symbol']})\n\n"
+                f"💸 Price: ${row['Price']:.5f}\n"
+                f"📈 24h: +{row['24h %']:.2f}% | 1h: {row['1h %']:.2f}%\n"
+                f"🔊 Volume: ${row['Volume_24h']/1e6:.1f}M\n"
+                f"🔥 Vol/Mcap: {row['Vol/Mcap %']:.1f}%\n"
+                f"🔮 Phase: {phase}\n\n"
+                f"#PumpDetector #Crypto"
+            )
+            send_telegram_message(message)
+            # Logging to CSV if needed
+
+if __name__ == '__main__':
+    while True:
+        print(f"🔄 Starting analysis at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        fetch_and_analyze_tokens()
+        print("⏸ Sleeping for 30 minutes...\n")
+        time.sleep(1800)
