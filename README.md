@@ -1,6 +1,6 @@
 # 🚨 PumpDetectorBot
 
-**PumpDetectorBot** is a Telegram-integrated Python bot that scans the **Top 500 tokens on CoinMarketCap** every 30 minutes and detects early-stage pump signals based on:
+**PumpDetectorBot** is a Telegram-integrated Python bot that scans the **Top 1000 tokens on CoinMarketCap** every 15 minutes and detects early-stage pump signals based on:
 
 - 📊 **Volume/MarketCap ratio**
 - ⚡ **Short-term momentum (1h/24h %)**
